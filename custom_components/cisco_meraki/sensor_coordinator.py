@@ -16,7 +16,13 @@ from meraki import APIError
 
 from .api import is_auth_error
 from .const import DOMAIN, LOGGER, SENSOR_SCAN_INTERVAL
-from .readings import ENERGY_SOURCE_METRIC, METRICS, MerakiReading, parse_reading
+from .readings import (
+    BINARY_METRICS,
+    ENERGY_SOURCE_METRIC,
+    METRICS,
+    MerakiReading,
+    parse_reading,
+)
 from .stats import (
     HOUR,
     MerakiStatistic,
@@ -207,6 +213,10 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
                 for item in sensor.get("readings", []):
                     if reading := parse_reading(sensor.get("serial", ""), item):
                         await self._async_statistics_for(reading)
+                        if reading.metric in BINARY_METRICS:
+                            # Doors and leaks only report on a change and every
+                            # 20 minutes or so; the latest state is known at once.
+                            self._latest[(reading.serial, reading.metric)] = reading
             resume = [
                 stat.hour_done
                 for stat in self.writer.statistics.values()
@@ -243,6 +253,9 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
         self, reading: MerakiReading
     ) -> list[MerakiStatistic]:
         """Return the statistics a reading feeds, creating them as needed."""
+        if reading.metric in BINARY_METRICS:
+            # A door or a leak is a state, not a measurement to average.
+            return []
         device = self.devices.data.devices.get(reading.serial)
         device_name = device.name if device else reading.serial
         metric = METRICS[reading.metric]

@@ -16,7 +16,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.util import dt as dt_util
 
 from .const import LOGGER
-from .readings import MerakiReading
+from .readings import MerakiReading, reading_value
 
 if TYPE_CHECKING:
     from homeassistant.components.mqtt import ReceiveMessage
@@ -41,6 +41,9 @@ MQTT_METRICS: dict[str, tuple[str, str]] = {
     "mainsCurrent": ("current", "mainsCurrent"),
     "mainsFrequency": ("frequency", "mainsFrequency"),
     "mainsPowerFactor": ("powerFactor", "mainsPowerFactor"),
+    "batteryPercentage": ("battery", "batteryPercentage"),
+    "door": ("door", "open"),
+    "waterDetection": ("water", "wet"),
 }
 
 
@@ -58,12 +61,12 @@ def parse_message(topic: str, payload: Any) -> tuple[str, MerakiReading] | None:
     if not isinstance(data, dict):
         return None
     key, field = metric
-    value = data.get(field)
+    value = reading_value(key, data.get(field))
     ts = dt_util.parse_datetime(data.get("ts") or "")
-    if ts is None or not isinstance(value, int | float) or isinstance(value, bool):
+    if ts is None or value is None:
         return None
     # The serial is filled in by the caller, which knows the devices.
-    return parts[-2].lower(), MerakiReading("", key, dt_util.as_utc(ts), float(value))
+    return parts[-2].lower(), MerakiReading("", key, dt_util.as_utc(ts), value)
 
 
 async def async_subscribe(

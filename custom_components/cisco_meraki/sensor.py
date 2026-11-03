@@ -201,7 +201,8 @@ def _async_setup_reading_sensors(
 
     @callback
     def _async_add_new_metrics() -> None:
-        new = (coordinator.data or {}).keys() - known
+        # Door and water states are binary sensors, see binary_sensor.py.
+        new = {key for key in (coordinator.data or {}) if key[1] in METRICS} - known
         if not new:
             return
         known.update(new)

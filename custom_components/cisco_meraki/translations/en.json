@@ -73,6 +73,12 @@
       },
       "remote_lockout": {
         "name": "Remote lockout"
+      },
+      "door": {
+        "name": "Door"
+      },
+      "water": {
+        "name": "Water"
       }
     },
     "sensor": {
