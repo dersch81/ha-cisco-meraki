@@ -11,11 +11,12 @@ import pytest
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import list_statistic_ids
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    async_capture_events,
     async_fire_mqtt_message,
     async_fire_time_changed,
 )
@@ -116,6 +117,15 @@ async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     await async_wait_recording_done(hass)
+
+
+async def _poll_at(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, when: datetime
+) -> None:
+    """Move the clock to the given time and let the next poll run."""
+    freezer.move_to(when)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 @pytest.mark.parametrize(
@@ -233,3 +243,50 @@ async def test_door_over_mqtt(
     door = hass.states.get("binary_sensor.front_door_door")
     assert door.state == STATE_OFF
     assert door.attributes["measured_at"] == NOW.isoformat()
+
+
+@pytest.mark.usefixtures("mqtt_mock", "mock_states")
+async def test_door_over_mqtt_every_change(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """A door that closes and opens again within a second shows every change."""
+    freezer.move_to(NOW)
+    await _setup(hass, mock_config_entry)
+    events = async_capture_events(hass, "state_changed")
+
+    for seconds, is_open in ((1, False), (2, True), (3, False)):
+        ts = NOW + timedelta(seconds=seconds)
+        async_fire_mqtt_message(
+            hass, f"{DOOR_PREFIX}/door", json.dumps({"ts": _iso(ts), "open": is_open})
+        )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert [
+        event.data["new_state"].state
+        for event in events
+        if event.data["entity_id"] == "binary_sensor.front_door_door"
+    ] == [STATE_OFF, STATE_ON, STATE_OFF]
+
+
+@pytest.mark.usefixtures("mock_states")
+async def test_silent_sensor_unknown(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """A door or leak whose sensor has gone silent for 7 hours becomes unknown."""
+    freezer.move_to(NOW)
+    await _setup(hass, mock_config_entry)
+
+    # The door sensor last measured at 12:10, the leak sensor at 12:05.
+    await _poll_at(hass, freezer, NOW + timedelta(hours=6, minutes=47))
+    assert hass.states.get("binary_sensor.front_door_door").state == STATE_ON
+    assert hass.states.get("binary_sensor.garage_leak_water").state == STATE_UNKNOWN
+
+    await _poll_at(hass, freezer, NOW + timedelta(hours=6, minutes=52))
+    door = hass.states.get("binary_sensor.front_door_door")
+    assert door.state == STATE_UNKNOWN
+    # When it last reported is still shown.
+    assert door.attributes["measured_at"] == (NOW - timedelta(minutes=10)).isoformat()

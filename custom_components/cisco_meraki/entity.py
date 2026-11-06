@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import MerakiDataUpdateCoordinator
+from .sensor_coordinator import MerakiSensorCoordinator, reading_unique_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
         MerakiSsid,
         MerakiSwitchPort,
     )
+    from .readings import MerakiReading
 
 
 class MerakiEntity(CoordinatorEntity[MerakiDataUpdateCoordinator]):
@@ -231,3 +233,45 @@ def _network_of(coordinator: MerakiDataUpdateCoordinator, unique_id: str) -> str
     # Device entities start with the serial, which has no underscores.
     device = coordinator.data.devices.get(unique_id.split("_", maxsplit=1)[0])
     return device.network_id if device else None
+
+
+class MerakiReadingEntity(CoordinatorEntity[MerakiSensorCoordinator]):
+    """An entity fed by the readings of a Meraki MT sensor."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self, coordinator: MerakiSensorCoordinator, serial: str, key: str
+    ) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+        self._serial = serial
+        self._key = key
+        self._attr_unique_id = reading_unique_id(serial, key)
+        self._attr_translation_key = _snake(key)
+        # The device is registered with its details by the device status sensor.
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, serial)})
+
+
+class MerakiLatestReadingEntity(MerakiReadingEntity):
+    """An entity showing the latest reading of one metric of a Meraki MT sensor."""
+
+    @property
+    def _reading(self) -> MerakiReading | None:
+        return (self.coordinator.data or {}).get((self._serial, self._key))
+
+    @property
+    def available(self) -> bool:
+        """Return True once the metric has a reading."""
+        return super().available and self._reading is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return when the reading was measured."""
+        reading = self._reading
+        return {"measured_at": reading.ts.isoformat() if reading else None}
+
+
+def _snake(key: str) -> str:
+    """Return a camelCase metric key as snake_case for translation keys."""
+    return "".join(f"_{c.lower()}" if c.isupper() else c for c in key)

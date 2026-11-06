@@ -10,20 +10,22 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.const import EntityCategory
 from homeassistant.core import callback
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
-from .entity import MerakiEntity, MerakiPortEntity, async_setup_port_entities
+from .entity import (
+    MerakiEntity,
+    MerakiLatestReadingEntity,
+    MerakiPortEntity,
+    async_setup_port_entities,
+)
 from .readings import BINARY_METRICS
-from .sensor_coordinator import MerakiSensorCoordinator, reading_unique_id
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
     from .coordinator import MerakiConfigEntry, MerakiDataUpdateCoordinator
-    from .readings import MerakiBinaryMetric, MerakiReading
+    from .readings import MerakiBinaryMetric
+    from .sensor_coordinator import MerakiSensorCoordinator
 
 # The coordinator polls; entities never request their own updates.
 PARALLEL_UPDATES = 0
@@ -133,17 +135,14 @@ class MerakiRemoteLockoutSensor(MerakiEntity, BinarySensorEntity):
         return None if locked is None else not locked
 
 
-class MerakiReadingBinarySensor(
-    CoordinatorEntity[MerakiSensorCoordinator], BinarySensorEntity
-):
+class MerakiReadingBinarySensor(MerakiLatestReadingEntity, BinarySensorEntity):
     """
     The door (MT20) or water (MT12) state of a Meraki MT sensor.
 
     Over MQTT, a change arrives within seconds. Through the API it shows up with the
-    next poll, as the sensor uploads its readings.
+    next poll, as the sensor uploads its readings. A sensor that has gone silent may
+    have missed a change, so its state becomes unknown.
     """
-
-    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -152,32 +151,13 @@ class MerakiReadingBinarySensor(
         metric: MerakiBinaryMetric,
     ) -> None:
         """Initialize the binary sensor."""
-        super().__init__(coordinator)
-        self._serial = serial
-        self._metric = metric.key
-        self._attr_unique_id = reading_unique_id(serial, metric.key)
-        self._attr_translation_key = metric.key
+        super().__init__(coordinator, serial, metric.key)
         self._attr_device_class = metric.device_class
-        # The device is registered with its details by the device status sensor.
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, serial)})
-
-    @property
-    def _reading(self) -> MerakiReading | None:
-        return (self.coordinator.data or {}).get((self._serial, self._metric))
-
-    @property
-    def available(self) -> bool:
-        """Return True once the state has been reported."""
-        return super().available and self._reading is not None
 
     @property
     def is_on(self) -> bool | None:
         """Return True while the door is open or water is detected."""
         reading = self._reading
-        return reading.value > 0 if reading else None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return when the state was reported."""
-        reading = self._reading
-        return {"measured_at": reading.ts.isoformat() if reading else None}
+        if reading is None or self.coordinator.is_silent(self._serial):
+            return None
+        return reading.value > 0

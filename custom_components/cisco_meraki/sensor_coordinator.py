@@ -61,6 +61,10 @@ MQTT_FLUSH_DELAY = 2
 # Sensors upload every 20 minutes; one that has not published over MQTT for longer
 # than this is polled through the API again.
 MQTT_FRESH = timedelta(minutes=30)
+# Door and water states are unknown once their sensor has measured nothing for this
+# long: it may have missed a change. An idle MT20 or MT12 reports only its battery,
+# every 6 hours (seen on real sensors); uploads arrive up to 20 minutes after that.
+SILENT_AFTER = timedelta(hours=7)
 
 type LatestReadings = dict[tuple[str, str], MerakiReading]
 
@@ -95,6 +99,8 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
         self._mqtt_flush_unsub: CALLBACK_TYPE | None = None
         # Serial -> when the sensor last delivered a reading over MQTT.
         self._mqtt_seen: dict[str, datetime] = {}
+        # Serial -> when the sensor measured its newest reading of any metric.
+        self._measured: dict[str, datetime] = {}
         config_entry.async_on_unload(self._async_cancel_mqtt_flush)
 
     @property
@@ -121,8 +127,18 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
         )
         if serial is None:
             return
-        self._mqtt_buffer.append(replace(reading, serial=serial))
+        reading = replace(reading, serial=serial)
         self._mqtt_seen[serial] = dt_util.utcnow()
+        if reading.metric in BINARY_METRICS:
+            # Not buffered: a door that opens and closes within the flush delay
+            # would only show its last state, and automations would miss it.
+            if self._keep_latest(reading):
+                # Without rescheduling the next poll, as async_set_updated_data
+                # would; a busy door could otherwise hold it off.
+                self.data = dict(self._latest)
+                self.async_update_listeners()
+            return
+        self._mqtt_buffer.append(reading)
         if self._mqtt_flush_unsub is None:
             self._mqtt_flush_unsub = async_call_later(
                 self.hass, MQTT_FLUSH_DELAY, self._async_flush_mqtt
@@ -145,6 +161,11 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
         """Return True if the sensor is currently delivering its readings over MQTT."""
         seen = self._mqtt_seen.get(serial)
         return seen is not None and now - seen < MQTT_FRESH
+
+    def is_silent(self, serial: str) -> bool:
+        """Return True if the sensor has measured nothing for too long to trust."""
+        measured = self._measured.get(serial)
+        return measured is None or dt_util.utcnow() - measured > SILENT_AFTER
 
     def energy_total(self, serial: str) -> float | None:
         """Return the energy (kWh) a power sensor has measured so far."""
@@ -216,7 +237,9 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
                         if reading.metric in BINARY_METRICS:
                             # Doors and leaks only report on a change and every
                             # 20 minutes or so; the latest state is known at once.
-                            self._latest[(reading.serial, reading.metric)] = reading
+                            self._keep_latest(reading)
+                        else:
+                            self._note_measured(reading)
             resume = [
                 stat.hour_done
                 for stat in self.writer.statistics.values()
@@ -244,10 +267,22 @@ class MerakiSensorCoordinator(DataUpdateCoordinator[LatestReadings]):
                 await asyncio.sleep(0)
             for stat in await self._async_statistics_for(reading):
                 stat.add(reading.ts, reading.value)
-            key = (reading.serial, reading.metric)
-            latest = self._latest.get(key)
-            if latest is None or reading.ts > latest.ts:
-                self._latest[key] = reading
+            self._keep_latest(reading)
+
+    def _keep_latest(self, reading: MerakiReading) -> bool:
+        """Keep the reading if it is the newest of its metric; return True if so."""
+        self._note_measured(reading)
+        key = (reading.serial, reading.metric)
+        latest = self._latest.get(key)
+        if latest is not None and reading.ts <= latest.ts:
+            return False
+        self._latest[key] = reading
+        return True
+
+    def _note_measured(self, reading: MerakiReading) -> None:
+        measured = self._measured.get(reading.serial)
+        if measured is None or reading.ts > measured:
+            self._measured[reading.serial] = reading.ts
 
     async def _async_statistics_for(
         self, reading: MerakiReading
