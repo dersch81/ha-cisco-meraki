@@ -158,6 +158,17 @@ TVOC, noise and indoor air quality (MT15), battery, and power, apparent power,
 voltage, current, frequency and power factor (MT40). The MT40 also gets an **Energy**
 sensor, integrated from its power readings.
 
+Open/close sensors (MT20) get a **Door** binary sensor that is on while the door is
+open, and water leak sensors (MT12) a **Water** binary sensor that is on while water
+is detected. These are states, not measurements, so they get no statistics; the
+`measured_at` attribute holds the time the sensor reported the state. Over MQTT, every
+change shows up within seconds, even a door that opens and closes again at once;
+through the API, the latest state shows up with the next poll after the sensor has
+uploaded it, so a door opened and closed in between is missed. An idle MT20 or MT12
+reports its battery every 6 hours; a sensor that has reported nothing for 7 hours may
+have missed a change, so its door or water state becomes unknown until it reports
+again.
+
 Meraki sensors upload their readings in batches, often 10 to 20 minutes after they
 were measured. Home Assistant records a state at the moment it is written, so graphs
 built from the states would show each batch bunched into a single moment. This

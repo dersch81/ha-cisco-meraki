@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.const import (
     PERCENTAGE,
@@ -144,18 +145,45 @@ METRICS: dict[str, MerakiMetric] = {
 
 
 @dataclass(frozen=True, slots=True)
+class MerakiBinaryMetric:
+    """An on/off state reported by Meraki MT sensors, such as an open door."""
+
+    key: str
+    # Path to the boolean inside the reading, e.g. ("door", "open").
+    path: tuple[str, ...]
+    device_class: BinarySensorDeviceClass
+
+
+# States, not measurements: they get a binary sensor and no statistics.
+BINARY_METRICS: dict[str, MerakiBinaryMetric] = {
+    metric.key: metric
+    for metric in (
+        # MT20 open/close sensor.
+        MerakiBinaryMetric("door", ("door", "open"), BinarySensorDeviceClass.DOOR),
+        # MT12 water leak sensor.
+        MerakiBinaryMetric(
+            "water", ("water", "present"), BinarySensorDeviceClass.MOISTURE
+        ),
+    )
+}
+
+
+@dataclass(frozen=True, slots=True)
 class MerakiReading:
     """One timestamped measurement of one metric."""
 
     serial: str
     metric: str
     ts: datetime
+    # For binary metrics, 1.0 while on (door open, water present) and 0.0 while off.
     value: float
 
 
 def parse_reading(serial: str, raw: dict[str, Any]) -> MerakiReading | None:
     """Return the reading for an API reading, or None if it is not supported."""
-    metric = METRICS.get(raw.get("metric", ""))
+    metric = METRICS.get(raw.get("metric", "")) or BINARY_METRICS.get(
+        raw.get("metric", "")
+    )
     if metric is None or not (ts := dt_util.parse_datetime(raw.get("ts") or "")):
         return None
     value: Any = raw
@@ -163,6 +191,15 @@ def parse_reading(serial: str, raw: dict[str, Any]) -> MerakiReading | None:
         if not isinstance(value, dict):
             return None
         value = value.get(key)
+    if (value := reading_value(metric.key, value)) is None:
+        return None
+    return MerakiReading(serial, metric.key, dt_util.as_utc(ts), value)
+
+
+def reading_value(metric: str, value: Any) -> float | None:
+    """Return a reported value as a reading value, or None if it does not fit."""
+    if metric in BINARY_METRICS:
+        return float(value) if isinstance(value, bool) else None
     if not isinstance(value, int | float) or isinstance(value, bool):
         return None
-    return MerakiReading(serial, metric.key, dt_util.as_utc(ts), float(value))
+    return float(value)

@@ -21,24 +21,20 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .camera_sense import LIGHT, MerakiCameraSense, SenseValue
-from .const import CLIENT_PRODUCT_TYPES, DEVICE_STATUSES, DOMAIN, UPLINK_STATUSES
+from .const import CLIENT_PRODUCT_TYPES, DEVICE_STATUSES, UPLINK_STATUSES
 from .entity import (
     MerakiEntity,
+    MerakiLatestReadingEntity,
     MerakiPortEntity,
+    MerakiReadingEntity,
     MerakiSsidEntity,
     async_setup_port_entities,
     async_setup_ssid_entities,
 )
 from .readings import ENERGY_SOURCE_METRIC, METRICS
-from .sensor_coordinator import (
-    ENERGY_KEY,
-    MerakiSensorCoordinator,
-    reading_unique_id,
-)
+from .sensor_coordinator import ENERGY_KEY
 from .stats import statistic_id
 
 if TYPE_CHECKING:
@@ -54,7 +50,8 @@ if TYPE_CHECKING:
         MerakiUplink,
         MerakiUplinkQuality,
     )
-    from .readings import MerakiMetric, MerakiReading
+    from .readings import MerakiMetric
+    from .sensor_coordinator import MerakiSensorCoordinator
 
 # The coordinator polls; entities never request their own updates.
 PARALLEL_UPDATES = 0
@@ -201,7 +198,8 @@ def _async_setup_reading_sensors(
 
     @callback
     def _async_add_new_metrics() -> None:
-        new = (coordinator.data or {}).keys() - known
+        # Door and water states are binary sensors, see binary_sensor.py.
+        new = {key for key in (coordinator.data or {}) if key[1] in METRICS} - known
         if not new:
             return
         known.update(new)
@@ -237,26 +235,7 @@ class MerakiSensor(MerakiEntity, SensorEntity):
         return self.entity_description.value_fn(self.device)
 
 
-class MerakiSensorReadingEntity(
-    CoordinatorEntity[MerakiSensorCoordinator], SensorEntity
-):
-    """A value measured by a Meraki MT sensor."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self, coordinator: MerakiSensorCoordinator, serial: str, key: str
-    ) -> None:
-        """Initialize the entity."""
-        super().__init__(coordinator)
-        self._serial = serial
-        self._attr_unique_id = reading_unique_id(serial, key)
-        self._attr_translation_key = _snake(key)
-        # The device is registered with its details by the device status sensor.
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, serial)})
-
-
-class MerakiReadingSensor(MerakiSensorReadingEntity):
+class MerakiReadingSensor(MerakiLatestReadingEntity, SensorEntity):
     """
     The latest reading of one metric of a Meraki MT sensor.
 
@@ -273,7 +252,6 @@ class MerakiReadingSensor(MerakiSensorReadingEntity):
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, serial, metric.key)
-        self._metric = metric.key
         self._attr_device_class = metric.device_class
         self._attr_native_unit_of_measurement = metric.unit
 
@@ -288,28 +266,13 @@ class MerakiReadingSensor(MerakiSensorReadingEntity):
         self.coordinator.writer.async_write()
 
     @property
-    def _reading(self) -> MerakiReading | None:
-        return (self.coordinator.data or {}).get((self._serial, self._metric))
-
-    @property
-    def available(self) -> bool:
-        """Return True once the metric has a reading."""
-        return super().available and self._reading is not None
-
-    @property
     def native_value(self) -> float | None:
         """Return the latest reading."""
         reading = self._reading
         return reading.value if reading else None
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return when the reading was measured."""
-        reading = self._reading
-        return {"measured_at": reading.ts.isoformat() if reading else None}
 
-
-class MerakiEnergySensor(MerakiSensorReadingEntity):
+class MerakiEnergySensor(MerakiReadingEntity, SensorEntity):
     """Energy used, integrated from a Meraki MT40's power readings."""
 
     _attr_device_class = SensorDeviceClass.ENERGY
@@ -332,11 +295,6 @@ class MerakiEnergySensor(MerakiSensorReadingEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return where the energy statistics are, for the energy dashboard."""
         return {"statistic_id": self._statistic_id}
-
-
-def _snake(key: str) -> str:
-    """Return a camelCase metric key as snake_case for translation keys."""
-    return "".join(f"_{c.lower()}" if c.isupper() else c for c in key)
 
 
 class MerakiPortPoePowerSensor(MerakiPortEntity, SensorEntity):
