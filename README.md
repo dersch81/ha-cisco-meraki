@@ -140,7 +140,7 @@ connection.
 
 Every Wi-Fi or wired client seen in the organization's networks (or the networks you
 select) in the last hour gets a **device tracker**. It is home while Meraki reports
-the client online, and shows its IP address, MAC address and hostname. Like other
+the client online, and shows its IP address, MAC address, hostname and VLAN. Like other
 network-based trackers, new trackers are disabled until you enable them, unless
 another integration already knows the device by its MAC address; the tracker is then
 added to that device.
@@ -150,6 +150,16 @@ offline after about five minutes without traffic, so a phone that leaves shows a
 about five to six minutes later. The trackers use the client data that is fetched for
 the client counts anyway, so they need no extra requests. Bluetooth devices are not
 tracked.
+
+Networks with many VLANs (guests, cameras, lab) can have hundreds of clients. To track
+only some of them, select **Client VLANs** in the integration's **Configure** dialog;
+it lists the VLANs clients are in now, with their client count, and other VLAN IDs
+can be typed in. Only clients in the selected VLANs then get a tracker. Trackers of
+clients seen in another VLAN are removed, together with the device the tracker
+created; devices of other integrations stay. Trackers of clients Meraki has not
+listed in the last hour stay until the client shows up again, as their VLAN is not
+known. Leave the selection empty to track clients in every VLAN. The integration's
+diagnostics list the clients with their VLAN and whether they are tracked.
 
 ### MT sensors
 
@@ -342,7 +352,8 @@ Home Assistant configuration and restart Home Assistant.
 4. Choose which networks to include. Leave the selection empty to include every
    network, including ones added later.
 
-To change the networks later, open the integration's **Configure** dialog.
+To change the networks later, or to track only the clients of some VLANs (see
+[Client presence](#client-presence)), open the integration's **Configure** dialog.
 
 ### API key access
 

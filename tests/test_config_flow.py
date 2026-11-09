@@ -15,6 +15,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.cisco_meraki.api import CALLER
 from custom_components.cisco_meraki.const import (
+    CONF_CLIENT_VLANS,
     CONF_NETWORKS,
     CONF_ORGANIZATION_ID,
     DOMAIN,
@@ -203,6 +204,45 @@ async def test_options_flow(
     # Both test devices are in NETWORK_ID, so the filter leaves nothing.
     assert NETWORK_ID not in mock_config_entry.options[CONF_NETWORKS]
     assert hass.states.get("sensor.office_ap_status").state == "unavailable"
+
+
+async def test_options_flow_client_vlans(
+    hass: HomeAssistant, mock_client: MagicMock, mock_config_entry: MockConfigEntry
+) -> None:
+    """The options offer the clients' VLANs and store the selection."""
+    mock_client.networks.getNetworkClients.return_value = [
+        {"mac": "aa:bb:cc:10:00:01", "status": "Online", "vlan": "1"},
+        {"mac": "aa:bb:cc:10:00:02", "status": "Online", "vlan": 11},
+        {"mac": "aa:bb:cc:10:00:03", "status": "Offline", "vlan": "11"},
+        {"mac": "aa:bb:cc:10:00:04", "status": "Online"},
+    ]
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={CONF_CLIENT_VLANS: ["30"]}
+    )
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(mock_config_entry.entry_id)
+    selector = result["data_schema"].schema[CONF_CLIENT_VLANS]
+    options = selector.config["options"]
+    # Sorted by number; the selected VLAN without clients is kept.
+    assert options == [
+        {"value": "1", "label": "VLAN 1 (1 client)"},
+        {"value": "11", "label": "VLAN 11 (2 clients)"},
+        {"value": "30", "label": "VLAN 30 (0 clients)"},
+    ]
+    assert selector.config["custom_value"] is True
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NETWORKS: [], CONF_CLIENT_VLANS: ["11", " 1 ", ""]}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert mock_config_entry.options == {
+        CONF_NETWORKS: [],
+        CONF_CLIENT_VLANS: ["1", "11"],
+    }
 
 
 def test_caller_version_matches_manifest() -> None:

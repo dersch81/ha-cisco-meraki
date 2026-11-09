@@ -10,6 +10,8 @@ MANUFACTURER = "Cisco Meraki"
 
 CONF_ORGANIZATION_ID = "organization_id"
 CONF_NETWORKS = "networks"
+# Only clients in these VLANs get a device tracker; empty means all VLANs.
+CONF_CLIENT_VLANS = "client_vlans"
 
 # Device, port and uplink status.
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=1)

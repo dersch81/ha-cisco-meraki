@@ -54,10 +54,12 @@
       "init": {
         "title": "Cisco Meraki options",
         "data": {
-          "networks": "Networks"
+          "networks": "Networks",
+          "client_vlans": "Client VLANs"
         },
         "data_description": {
-          "networks": "Only include devices from these networks. Leave empty to include all networks."
+          "networks": "Only include devices from these networks. Leave empty to include all networks.",
+          "client_vlans": "Only clients in these VLANs get a device tracker; trackers of clients seen in other VLANs are removed. Leave empty to track clients in all VLANs. VLANs not listed can be typed in."
         }
       }
     },

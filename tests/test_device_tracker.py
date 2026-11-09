@@ -16,7 +16,11 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.cisco_meraki.const import DEFAULT_SCAN_INTERVAL
+from custom_components.cisco_meraki.const import (
+    CONF_CLIENT_VLANS,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+)
 
 from .conftest import DEVICES, ORG_ID, make_api_error
 
@@ -32,6 +36,7 @@ CLIENTS = [
         "lastSeen": "2026-10-20T20:59:00Z",
         "recentDeviceSerial": "Q2AA-AAAA-AAAA",
         "status": "Online",
+        "vlan": "1",
     },
     {
         "mac": "aa:bb:cc:10:00:02",
@@ -41,6 +46,8 @@ CLIENTS = [
         "recentDeviceSerial": "Q2SW-SSSS-SSSS",
         "switchport": "4",
         "status": "Online",
+        # The API documents a string, but a number is handled the same way.
+        "vlan": 11,
     },
     {
         "mac": "aa:bb:cc:10:00:03",
@@ -49,6 +56,7 @@ CLIENTS = [
         "lastSeen": "2026-10-20T20:15:00Z",
         "recentDeviceSerial": "Q2AA-AAAA-AAAA",
         "status": "Offline",
+        "vlan": "20",
     },
 ]
 
@@ -62,7 +70,8 @@ def clients(mock_client: MagicMock) -> list[dict[str, Any]]:
 
 
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
-    entry.add_to_hass(hass)
+    if hass.config_entries.async_get_entry(entry.entry_id) is None:
+        entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
 
@@ -87,6 +96,8 @@ async def test_trackers(
     assert phone.attributes["ip"] == "192.168.1.20"
     assert phone.attributes["mac"] == PHONE_MAC
     assert phone.attributes["host_name"] == "Pixel 9"
+    assert phone.attributes["vlan"] == "1"
+    assert hass.states.get("device_tracker.nas").attributes["vlan"] == "11"
     assert hass.states.get("device_tracker.nas").state == STATE_HOME
     # Clients without a name are named by their MAC address.
     assert hass.states.get("device_tracker.aa_bb_cc_10_00_03").state == STATE_NOT_HOME
@@ -213,3 +224,135 @@ async def test_update_failed(
     mock_client.networks.getNetworkClients.side_effect = make_api_error(503)
     await _poll(hass, freezer)
     assert hass.states.get(PHONE).state == STATE_UNAVAILABLE
+
+
+NAS_MAC = "aa:bb:cc:10:00:02"
+LAPTOP = "device_tracker.aa_bb_cc_10_00_03"
+
+
+async def _set_vlans(
+    hass: HomeAssistant, entry: MockConfigEntry, vlans: list[str]
+) -> None:
+    """Change the VLAN option; the entry reloads as after the options flow."""
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_CLIENT_VLANS: vlans}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "clients", "freezer")
+async def test_vlan_filter(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Only clients in the selected VLANs get a tracker."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={CONF_CLIENT_VLANS: ["1", "11"]}
+    )
+    await _setup(hass, mock_config_entry)
+
+    assert hass.states.get(PHONE).state == STATE_HOME
+    assert hass.states.get("device_tracker.nas").state == STATE_HOME
+    assert hass.states.get(LAPTOP) is None
+    assert not entity_registry.async_get_entity_id(
+        "device_tracker", DOMAIN, f"{ORG_ID}_aa:bb:cc:10:00:03"
+    )
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "clients", "freezer")
+async def test_vlan_filter_removes_trackers(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+    device_registry: dr.DeviceRegistry,
+) -> None:
+    """Selecting VLANs removes the trackers and devices of clients outside them."""
+    other_entry = MockConfigEntry(domain="other")
+    other_entry.add_to_hass(hass)
+    other_device = device_registry.async_get_or_create(
+        config_entry_id=other_entry.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, NAS_MAC)},
+    )
+    await _setup(hass, mock_config_entry)
+    nas = entity_registry.async_get("device_tracker.nas")
+    # The tracker of a device another integration knows gets its own device.
+    assert nas.device_id is not None
+    assert nas.device_id != other_device.id
+    nas_device_id = nas.device_id
+
+    await _set_vlans(hass, mock_config_entry, ["1"])
+
+    assert hass.states.get(PHONE).state == STATE_HOME
+    assert entity_registry.async_get("device_tracker.nas") is None
+    assert hass.states.get("device_tracker.nas") is None
+    assert entity_registry.async_get(LAPTOP) is None
+    assert device_registry.async_get(nas_device_id) is None
+    # The other integration's device stays.
+    assert device_registry.async_get(other_device.id) is not None
+    # The Meraki devices themselves are untouched.
+    assert any(
+        (DOMAIN, "Q2SW-SSSS-SSSS") in device.identifiers
+        for device in dr.async_entries_for_config_entry(
+            device_registry, mock_config_entry.entry_id
+        )
+    )
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "freezer")
+async def test_vlan_filter_keeps_unlisted_trackers(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    clients: list[dict[str, Any]],
+) -> None:
+    """Trackers of clients the API no longer lists stay, as their VLAN is unknown."""
+    await _setup(hass, mock_config_entry)
+    del clients[2]
+    await _set_vlans(hass, mock_config_entry, ["1"])
+
+    assert hass.states.get(LAPTOP).state == STATE_NOT_HOME
+    assert hass.states.get("device_tracker.nas") is None
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_client_changes_vlan(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    clients: list[dict[str, Any]],
+    freezer: FrozenDateTimeFactory,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """A client leaving the selected VLANs loses its tracker until it returns."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={CONF_CLIENT_VLANS: ["1"]}
+    )
+    await _setup(hass, mock_config_entry)
+    assert hass.states.get(PHONE).state == STATE_HOME
+
+    clients[0]["vlan"] = "20"
+    await _poll(hass, freezer)
+    assert entity_registry.async_get(PHONE) is None
+
+    clients[0]["vlan"] = "1"
+    await _poll(hass, freezer)
+    assert hass.states.get(PHONE).state == STATE_HOME
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "clients", "freezer")
+async def test_no_vlan_selected_tracks_all(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    clients: list[dict[str, Any]],
+) -> None:
+    """Without a VLAN selection, clients without a VLAN are tracked too."""
+    del clients[0]["vlan"]
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={CONF_CLIENT_VLANS: []}
+    )
+    await _setup(hass, mock_config_entry)
+    assert hass.states.get(PHONE).state == STATE_HOME
+    assert hass.states.get(PHONE).attributes["vlan"] is None
+    assert hass.states.get(LAPTOP) is not None

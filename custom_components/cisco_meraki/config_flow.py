@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
@@ -25,7 +26,13 @@ from homeassistant.helpers.selector import (
 from meraki import APIError
 
 from .api import async_close_client, async_create_client, is_auth_error
-from .const import CONF_NETWORKS, CONF_ORGANIZATION_ID, DOMAIN, LOGGER
+from .const import (
+    CONF_CLIENT_VLANS,
+    CONF_NETWORKS,
+    CONF_ORGANIZATION_ID,
+    DOMAIN,
+    LOGGER,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -58,6 +65,34 @@ def networks_schema(networks: list[dict[str, Any]]) -> vol.Schema:
             )
         }
     )
+
+
+def client_vlans_schema(clients_per_vlan: Mapping[str, int]) -> vol.Schema:
+    """Return a schema to pick the VLANs whose clients get a device tracker."""
+    options = [
+        SelectOptionDict(
+            value=vlan,
+            label=f"VLAN {vlan} ({count} client{'' if count == 1 else 's'})",
+        )
+        for vlan, count in sorted(clients_per_vlan.items(), key=_vlan_sort_key)
+    ]
+    return vol.Schema(
+        {
+            vol.Optional(CONF_CLIENT_VLANS): SelectSelector(
+                SelectSelectorConfig(
+                    options=options,
+                    multiple=True,
+                    custom_value=True,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        }
+    )
+
+
+def _vlan_sort_key(item: tuple[str, int]) -> tuple[int, int, str]:
+    vlan = item[0]
+    return (0, int(vlan), "") if vlan.isdigit() else (1, 0, vlan)
 
 
 class MerakiConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -237,13 +272,18 @@ class MerakiConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class MerakiOptionsFlow(OptionsFlow):
-    """Let the user restrict the integration to a subset of networks."""
+    """Let the user restrict the integration to some networks and client VLANs."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Choose which networks to include."""
+        """Choose which networks to include and whose clients to track."""
         if user_input is not None:
+            if CONF_CLIENT_VLANS in user_input:
+                user_input[CONF_CLIENT_VLANS] = sorted(
+                    {vlan.strip() for vlan in user_input[CONF_CLIENT_VLANS]} - {""},
+                    key=lambda vlan: _vlan_sort_key((vlan, 0)),
+                )
             return self.async_create_entry(data=user_input)
 
         entry: MerakiConfigEntry = self.config_entry
@@ -259,10 +299,22 @@ class MerakiOptionsFlow(OptionsFlow):
             LOGGER.debug("Could not list networks: %s", err)
             return self.async_abort(reason="cannot_connect")
 
+        # Offer the VLANs clients are in now, and keep the selected ones even
+        # while none of their clients is listed.
+        clients_per_vlan = Counter(
+            client.vlan
+            for client in entry.runtime_data.data.clients.values()
+            if client.vlan is not None
+        )
+        for vlan in entry.options.get(CONF_CLIENT_VLANS) or ():
+            clients_per_vlan.setdefault(vlan, 0)
+
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(
-                networks_schema(networks),
+                networks_schema(networks).extend(
+                    client_vlans_schema(clients_per_vlan).schema
+                ),
                 entry.options,
             ),
         )

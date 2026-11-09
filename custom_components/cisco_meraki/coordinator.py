@@ -91,6 +91,8 @@ class MerakiClient:
     ip: str | None
     online: bool
     last_seen: datetime | None
+    # The VLAN the client was last seen in, as a string; None if Meraki reports none.
+    vlan: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1199,11 +1201,20 @@ def _merge_clients(
                 ip=item.get("ip"),
                 online=item.get("status") == "Online",
                 last_seen=_parse_last_seen(item.get("lastSeen")),
+                vlan=_parse_vlan(item.get("vlan")),
             )
             # A client that moved between networks is listed in both.
             if (known := clients.get(mac)) is None or _is_more_recent(client, known):
                 clients[mac] = client
     return clients
+
+
+def _parse_vlan(value: Any) -> str | None:
+    # The API documents the VLAN as a string, but numbers are accepted too.
+    if value is None or isinstance(value, bool):
+        return None
+    vlan = str(value).strip()
+    return vlan or None
 
 
 def _parse_last_seen(value: Any) -> datetime | None:
